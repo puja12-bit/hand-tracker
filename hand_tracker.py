@@ -11,7 +11,7 @@ class MouseController:
     def __init__(self):
         self.screen_w, self.screen_h = pyautogui.size()
         # Smoothing factor: higher = smoother but more lag
-        self.smoothening = 3.0 
+        self.smoothening = 5.0 
         self.prev_x, self.prev_y = self.screen_w / 2, self.screen_h / 2
         self.curr_x, self.curr_y = self.screen_w / 2, self.screen_h / 2
         
@@ -22,6 +22,7 @@ class MouseController:
         
         self.is_drawing = False
         self.movement_pause = 0
+        self.dead_zone = 8
         
     def determine_mode(self, fingers_up):
         new_mode = "NONE"
@@ -50,10 +51,16 @@ class MouseController:
         
         # 1. Map and Move (allowed in MOVE and DRAW modes)
         if index_pt and self.stable_mode in ["MOVE", "DRAW"]:
-            target_x = np.interp(index_pt[0], [cam_w * 0.1, cam_w * 0.9], [0, self.screen_w])
-            target_y = np.interp(index_pt[1], [cam_h * 0.1, cam_h * 0.9], [0, self.screen_h])
+            # Expand camera bounds mapping to make movement feel less sensitive
+            target_x = np.interp(index_pt[0], [cam_w * 0.05, cam_w * 0.95], [0, self.screen_w])
+            target_y = np.interp(index_pt[1], [cam_h * 0.05, cam_h * 0.95], [0, self.screen_h])
             
-            # Fix drawing release jitter
+            # Dead zone: ignore micro-movements to reduce shivering
+            dist_to_target = math.hypot(target_x - self.prev_x, target_y - self.prev_y)
+            if dist_to_target < self.dead_zone:
+                target_x, target_y = self.prev_x, self.prev_y
+
+            # Fix drawing release jitter delay
             if self.movement_pause > 0:
                 self.movement_pause -= 1
                 target_x, target_y = self.prev_x, self.prev_y
@@ -61,8 +68,21 @@ class MouseController:
             self.curr_x = self.prev_x + (target_x - self.prev_x) / self.smoothening
             self.curr_y = self.prev_y + (target_y - self.prev_y) / self.smoothening
             
-            pyautogui.moveTo(int(self.curr_x), int(self.curr_y))
-            self.prev_x, self.prev_y = self.curr_x, self.curr_y
+            clamped_x = self.curr_x
+            clamped_y = self.curr_y
+            
+            # Prevent cursor from entering the Top-Right UI region (400x300 zone + 10px buffer)
+            if clamped_x > self.screen_w - 410 and clamped_y < 310:
+                # Push back out of the zone depending on which way was closer
+                overlap_x = clamped_x - (self.screen_w - 410)
+                overlap_y = 310 - clamped_y
+                if overlap_x < overlap_y:
+                    clamped_x = self.screen_w - 410
+                else:
+                    clamped_y = 310
+            
+            pyautogui.moveTo(int(clamped_x), int(clamped_y))
+            self.prev_x, self.prev_y = clamped_x, clamped_y
 
         # Basic distance eval
         dist = 0
@@ -282,8 +302,10 @@ def main():
 
     window_name = "Hand Tracking Magic"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(window_name, 320, 240)
-    cv2.moveWindow(window_name, 10, 10)
+    cv2.resizeWindow(window_name, 400, 300)
+    # Move to top-right corner safely
+    cv2.moveWindow(window_name, mouse_ctrl.screen_w - 400, 0)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
 
     while cap.isOpened():
         ret, frame = cap.read()
