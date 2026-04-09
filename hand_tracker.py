@@ -25,10 +25,25 @@ class MouseController:
         self.dead_zone = 8
         self.is_pinching_click = False
         self.pinch_frames = 0
+        self.palm_frames = 0
+        self.fist_cooldown = 0
         
     def determine_mode(self, fingers_up):
-        # Temporarily force DRAW mode to guarantee uninterrupted drag mechanics natively
-        self.stable_mode = "DRAW"
+        new_mode = "DRAW" # Default for pinch-to-draw Mechanics
+        if fingers_up == [False, False, False, False]:
+            new_mode = "FIST"
+        elif fingers_up == [True, True, True, True]:
+            new_mode = "PALM"
+            
+        if new_mode != self.mode:
+            self.mode = new_mode
+            self.mode_flicker_count = 1
+        else:
+            self.mode_flicker_count += 1
+            
+        # Stability check against flicker
+        if self.mode_flicker_count > 5:
+            self.stable_mode = self.mode
 
     def update(self, index_pt, thumb_pt, cam_w, cam_h, fingers_up):
         self.determine_mode(fingers_up)
@@ -45,8 +60,8 @@ class MouseController:
             
             is_pinched = self.pinch_frames > 2 # Require multiple frames of pinch to confirm
         
-        # 1. Map and Move (allowed in MOVE and DRAW modes)
-        if index_pt and self.stable_mode in ["MOVE", "DRAW"]:
+        # 1. Map and Move (allowed in all modes so cursor doesn't freeze)
+        if index_pt:
             # Expand camera bounds mapping to make movement feel less sensitive
             target_x = np.interp(index_pt[0], [cam_w * 0.05, cam_w * 0.95], [0, self.screen_w])
             target_y = np.interp(index_pt[1], [cam_h * 0.05, cam_h * 0.95], [0, self.screen_h])
@@ -84,24 +99,12 @@ class MouseController:
             pyautogui.moveTo(int(clamped_x), int(clamped_y))
             self.prev_x, self.prev_y = clamped_x, clamped_y
             
-        if self.click_cooldown > 0:
-            self.click_cooldown -= 1
+        if self.fist_cooldown > 0:
+            self.fist_cooldown -= 1
             
         # 2. Control Mode Routing
-        if self.stable_mode == "MOVE":
-            if self.is_drawing:
-                pyautogui.mouseUp()
-                self.is_drawing = False
-                
-            if is_pinched:
-                # Fire click only once per pinch event using boolean state gate
-                if not self.is_pinching_click:
-                    pyautogui.click()
-                    self.is_pinching_click = True
-            else:
-                self.is_pinching_click = False
-                    
-        elif self.stable_mode == "DRAW":
+        if self.stable_mode == "DRAW":
+            self.palm_frames = 0 # reset hold timer
             if is_pinched:
                 if not self.is_drawing:
                     pyautogui.mouseDown()
@@ -110,18 +113,29 @@ class MouseController:
                 if self.is_drawing:
                     pyautogui.mouseUp()
                     self.is_drawing = False
-                    self.movement_pause = 10 # Delay before resume
-
-        elif self.stable_mode == "ERASE":
-            if self.click_cooldown == 0:
-                pyautogui.press('e')
-                self.click_cooldown = 40
+                    self.movement_pause = 10 
+                    
+        elif self.stable_mode == "FIST":
+            self.palm_frames = 0
+            if self.is_drawing:
+                pyautogui.mouseUp()
+                self.is_drawing = False
                 
-        elif self.stable_mode == "CLEAR":
-            if self.click_cooldown == 0:
+            # Keep object delete fast and responsive
+            if self.fist_cooldown == 0:
+                pyautogui.press('delete')
+                self.fist_cooldown = 40 # Prevent spamming delete
+                
+        elif self.stable_mode == "PALM":
+            if self.is_drawing:
+                pyautogui.mouseUp()
+                self.is_drawing = False
+                
+            # Add delay (frame hold) for open palm to prevent accidental full clear
+            self.palm_frames += 1
+            if self.palm_frames == 40: # Approx 1.5 seconds hold
                 pyautogui.hotkey('ctrl', 'a')
                 pyautogui.press('delete')
-                self.click_cooldown = 60
 
 class HandTracker:
     def __init__(self, max_hands=1):
