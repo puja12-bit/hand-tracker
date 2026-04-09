@@ -24,6 +24,7 @@ class MouseController:
         self.movement_pause = 0
         self.dead_zone = 8
         self.is_pinching_click = False
+        self.pinch_frames = 0
         
     def determine_mode(self, fingers_up):
         new_mode = "NONE"
@@ -55,7 +56,12 @@ class MouseController:
         is_pinched = False
         if index_pt and thumb_pt:
             dist = math.hypot(thumb_pt[0] - index_pt[0], thumb_pt[1] - index_pt[1])
-            is_pinched = dist < 40
+            if dist < 40:
+                self.pinch_frames += 1
+            else:
+                self.pinch_frames = 0
+            
+            is_pinched = self.pinch_frames > 2 # Require multiple frames of pinch to confirm
         
         # 1. Map and Move (allowed in MOVE and DRAW modes)
         if index_pt and self.stable_mode in ["MOVE", "DRAW"]:
@@ -92,6 +98,10 @@ class MouseController:
                     clamped_x = self.screen_w - 410
                 else:
                     clamped_y = 310
+                    
+            # Safe Zone Limiters: Block cursor from hitting taskbar or sharp window corners
+            clamped_x = max(20, min(self.screen_w - 20, clamped_x))
+            clamped_y = max(20, min(self.screen_h - 60, clamped_y)) # 60px bottom protection margin
             
             pyautogui.moveTo(int(clamped_x), int(clamped_y))
             self.prev_x, self.prev_y = clamped_x, clamped_y
