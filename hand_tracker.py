@@ -27,26 +27,8 @@ class MouseController:
         self.pinch_frames = 0
         
     def determine_mode(self, fingers_up):
-        new_mode = "NONE"
-        if fingers_up == [True, False, False, False]:
-            new_mode = "MOVE"
-        elif fingers_up == [True, True, False, False]:
-            new_mode = "DRAW"
-        elif fingers_up == [True, True, True, False]:
-            new_mode = "ERASE"
-        elif fingers_up == [True, True, True, True]:
-            new_mode = "CLEAR"
-            
-        if new_mode != "NONE":
-            if new_mode == self.mode:
-                self.mode_flicker_count += 1
-            else:
-                self.mode = new_mode
-                self.mode_flicker_count = 1
-                
-            # Stability check against flicker
-            if self.mode_flicker_count > 5:
-                self.stable_mode = self.mode
+        # Temporarily force DRAW mode to guarantee uninterrupted drag mechanics natively
+        self.stable_mode = "DRAW"
 
     def update(self, index_pt, thumb_pt, cam_w, cam_h, fingers_up):
         self.determine_mode(fingers_up)
@@ -72,10 +54,6 @@ class MouseController:
             # Dead zone: ignore micro-movements to reduce shivering
             dist_to_target = math.hypot(target_x - self.prev_x, target_y - self.prev_y)
             if dist_to_target < self.dead_zone:
-                target_x, target_y = self.prev_x, self.prev_y
-
-            # Absolute pinch lock: freeze cursor while a click pinch is actively held
-            if self.stable_mode == "MOVE" and is_pinched:
                 target_x, target_y = self.prev_x, self.prev_y
 
             # Fix drawing release jitter delay
