@@ -330,12 +330,18 @@ class EffectsRenderer:
 class CloneEffect:
     def __init__(self):
         self.is_cloning = False
-        self.frame_buffer = deque(maxlen=15) 
         self.flicker_count = 0
+        self.clone_canvas = None
+        self.clones = []
+        self.clone_cooldown = 0
         
     def process(self, frame, all_hands):
-        self.frame_buffer.append(frame.copy())
+        h, w = frame.shape[:2]
         
+        # Initialize canvas if needed
+        if self.clone_canvas is None or self.clone_canvas.shape != frame.shape:
+            self.clone_canvas = np.zeros_like(frame)
+            
         triggered = False
         if len(all_hands) == 2:
             h1 = all_hands[0]
@@ -373,21 +379,59 @@ class CloneEffect:
         if self.flicker_count > 3:
             self.is_cloning = True
 
-        # Render dynamically delayed clones
-        if self.is_cloning and len(self.frame_buffer) == 15:
-            past_img = self.frame_buffer[0]
-            h, w = frame.shape[:2]
+        if self.clone_cooldown > 0:
+            self.clone_cooldown -= 1
+
+        # Render logically and persistently
+        if self.is_cloning:
+            if self.clone_cooldown == 0 and len(self.clones) < 8: # Limit number of clones
+                self._capture_clone(frame, all_hands)
+                self.clone_cooldown = 15 # Delay between drops
             
-            # Split off to sides heavily
-            M_right = np.float32([[1, 0, 160], [0, 1, 0]])
-            M_left = np.float32([[1, 0, -160], [0, 1, 0]])
+            # Blend canvas with main frame to avoid flickering natively
+            cv2.addWeighted(frame, 1.0, self.clone_canvas, 0.6, 0, frame)
+        else:
+            # Reset clones when gesture is removed
+            self.clones.clear()
+            self.clone_canvas.fill(0)
             
-            ghost1 = cv2.warpAffine(past_img, M_right, (w, h))
-            ghost2 = cv2.warpAffine(past_img, M_left, (w, h))
+    def _capture_clone(self, frame, all_hands):
+        h, w = frame.shape[:2]
+        
+        # Bounding box around hands strictly
+        min_x, min_y, max_x, max_y = w, h, 0, 0
+        for hand in all_hands:
+            for pt in hand["fingertips"].values():
+                min_x = min(min_x, pt[0])
+                max_x = max(max_x, pt[0])
+                min_y = min(min_y, pt[1])
+                max_y = max(max_y, pt[1])
+                
+        pad = 80
+        min_x, min_y = max(0, min_x - pad), max(0, min_y - pad)
+        max_x, max_y = min(w, max_x + pad), min(h, max_y + pad)
+        
+        if max_x - min_x < 20 or max_y - min_y < 20: return
+        
+        crop = frame[min_y:max_y, min_x:max_x].copy()
+        cw, ch = crop.shape[1], crop.shape[0]
+        
+        # Resize properly while preserving aspect ratio
+        new_w, new_h = max(1, int(cw * 0.5)), max(1, int(ch * 0.5))
+        crop_resized = cv2.resize(crop, (new_w, new_h))
+        
+        idx = len(self.clones)
+        # Place them along the left/right edges iteratively
+        if idx % 2 == 0:
+            px = 20
+            py = max(20, min(h - new_h - 20, (idx // 2) * int(h / 3.5) + 20))
+        else:
+            px = w - new_w - 20
+            py = max(20, min(h - new_h - 20, (idx // 2) * int(h / 3.5) + 20))
             
-            # Blend compositionally exclusively over the camera frame array directly
-            cv2.addWeighted(frame, 1.0, ghost1, 0.5, 0, frame)
-            cv2.addWeighted(frame, 1.0, ghost2, 0.5, 0, frame)
+        # Draw onto canvas strictly
+        self.clone_canvas[py:py+new_h, px:px+new_w] = crop_resized
+        self.clones.append((px, py))
 
 def main():
     cap = cv2.VideoCapture(0)
