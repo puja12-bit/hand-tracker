@@ -23,6 +23,7 @@ class MouseController:
         self.is_drawing = False
         self.movement_pause = 0
         self.dead_zone = 8
+        self.is_pinching_click = False
         
     def determine_mode(self, fingers_up):
         new_mode = "NONE"
@@ -49,6 +50,13 @@ class MouseController:
     def update(self, index_pt, thumb_pt, cam_w, cam_h, fingers_up):
         self.determine_mode(fingers_up)
         
+        # Evaluate pinch state globally for the frame
+        dist = 0
+        is_pinched = False
+        if index_pt and thumb_pt:
+            dist = math.hypot(thumb_pt[0] - index_pt[0], thumb_pt[1] - index_pt[1])
+            is_pinched = dist < 40
+        
         # 1. Map and Move (allowed in MOVE and DRAW modes)
         if index_pt and self.stable_mode in ["MOVE", "DRAW"]:
             # Expand camera bounds mapping to make movement feel less sensitive
@@ -58,6 +66,10 @@ class MouseController:
             # Dead zone: ignore micro-movements to reduce shivering
             dist_to_target = math.hypot(target_x - self.prev_x, target_y - self.prev_y)
             if dist_to_target < self.dead_zone:
+                target_x, target_y = self.prev_x, self.prev_y
+
+            # Absolute pinch lock: freeze cursor while a click pinch is actively held
+            if self.stable_mode == "MOVE" and is_pinched:
                 target_x, target_y = self.prev_x, self.prev_y
 
             # Fix drawing release jitter delay
@@ -83,11 +95,6 @@ class MouseController:
             
             pyautogui.moveTo(int(clamped_x), int(clamped_y))
             self.prev_x, self.prev_y = clamped_x, clamped_y
-
-        # Basic distance eval
-        dist = 0
-        if index_pt and thumb_pt:
-            dist = math.hypot(thumb_pt[0] - index_pt[0], thumb_pt[1] - index_pt[1])
             
         if self.click_cooldown > 0:
             self.click_cooldown -= 1
@@ -98,22 +105,24 @@ class MouseController:
                 pyautogui.mouseUp()
                 self.is_drawing = False
                 
-            if index_pt and thumb_pt and self.click_cooldown == 0:
-                if dist < 40: 
+            if is_pinched:
+                # Fire click only once per pinch event using boolean state gate
+                if not self.is_pinching_click:
                     pyautogui.click()
-                    self.click_cooldown = 15
+                    self.is_pinching_click = True
+            else:
+                self.is_pinching_click = False
                     
         elif self.stable_mode == "DRAW":
-            if index_pt and thumb_pt:
-                if dist < 40:
-                    if not self.is_drawing:
-                        pyautogui.mouseDown()
-                        self.is_drawing = True
-                else:
-                    if self.is_drawing:
-                        pyautogui.mouseUp()
-                        self.is_drawing = False
-                        self.movement_pause = 10 # Delay before resume
+            if is_pinched:
+                if not self.is_drawing:
+                    pyautogui.mouseDown()
+                    self.is_drawing = True
+            else:
+                if self.is_drawing:
+                    pyautogui.mouseUp()
+                    self.is_drawing = False
+                    self.movement_pause = 10 # Delay before resume
 
         elif self.stable_mode == "ERASE":
             if self.click_cooldown == 0:
