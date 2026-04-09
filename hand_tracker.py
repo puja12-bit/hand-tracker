@@ -27,13 +27,18 @@ class MouseController:
         self.pinch_frames = 0
         self.palm_frames = 0
         self.fist_cooldown = 0
+        self.is_pinched = False
         
-    def determine_mode(self, fingers_up):
-        new_mode = "DRAW" # Default for pinch-to-draw Mechanics
-        if fingers_up == [False, False, False, False]:
-            new_mode = "FIST"
-        elif fingers_up == [True, True, True, True]:
+    def determine_mode(self, fingers_up, is_pinched):
+        up_count = sum(fingers_up)
+        
+        # Priority System
+        if up_count == 4:
             new_mode = "PALM"
+        elif up_count == 0 and not is_pinched: # FIST only if not actively pinching
+            new_mode = "FIST"
+        else:
+            new_mode = "DRAW"
             
         if new_mode != self.mode:
             self.mode = new_mode
@@ -41,14 +46,16 @@ class MouseController:
         else:
             self.mode_flicker_count += 1
             
-        # Stability check against flicker
-        if self.mode_flicker_count > 5:
+        # Add frame buffering for mode switching (debounce flicker)
+        if self.mode_flicker_count > 7:
             self.stable_mode = self.mode
+            
+        # Exception: if we are actively pinching, ensure we stay in DRAW mode
+        if is_pinched and self.stable_mode != "DRAW":
+            self.stable_mode = "DRAW"
 
     def update(self, index_pt, thumb_pt, cam_w, cam_h, fingers_up):
-        self.determine_mode(fingers_up)
-        
-        # Evaluate pinch state globally for the frame
+        # Evaluate pinch state globally for the frame FIRST
         dist = 0
         is_pinched = False
         if index_pt and thumb_pt:
@@ -59,6 +66,11 @@ class MouseController:
                 self.pinch_frames = 0
             
             is_pinched = self.pinch_frames > 2 # Require multiple frames of pinch to confirm
+            
+        self.is_pinched = is_pinched
+        
+        # Determine mode dynamically with pinch priority
+        self.determine_mode(fingers_up, is_pinched)
         
         # 1. Map and Move (allowed in all modes so cursor doesn't freeze)
         if index_pt:
@@ -358,6 +370,8 @@ def main():
 
         # Draw Mode Text
         cv2.putText(frame, f"Mode: {mouse_ctrl.stable_mode}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+        pinch_color = (0, 255, 0) if mouse_ctrl.is_pinched else (0, 0, 255)
+        cv2.putText(frame, f"Pinched: {mouse_ctrl.is_pinched}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, pinch_color, 2)
 
         # Show final frame
         cv2.imshow(window_name, frame)
