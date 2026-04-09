@@ -3,6 +3,108 @@ import mediapipe as mp
 import numpy as np
 import math
 from collections import deque
+import pyautogui
+
+pyautogui.FAILSAFE = False
+pyautogui.PAUSE = 0
+class MouseController:
+    def __init__(self):
+        self.screen_w, self.screen_h = pyautogui.size()
+        # Smoothing factor: higher = smoother but more lag
+        self.smoothening = 3.0 
+        self.prev_x, self.prev_y = self.screen_w / 2, self.screen_h / 2
+        self.curr_x, self.curr_y = self.screen_w / 2, self.screen_h / 2
+        
+        self.click_cooldown = 0
+        self.mode = "MOVE"
+        self.mode_flicker_count = 0
+        self.stable_mode = "MOVE"
+        
+        self.is_drawing = False
+        self.movement_pause = 0
+        
+    def determine_mode(self, fingers_up):
+        new_mode = "NONE"
+        if fingers_up == [True, False, False, False]:
+            new_mode = "MOVE"
+        elif fingers_up == [True, True, False, False]:
+            new_mode = "DRAW"
+        elif fingers_up == [True, True, True, False]:
+            new_mode = "ERASE"
+        elif fingers_up == [True, True, True, True]:
+            new_mode = "CLEAR"
+            
+        if new_mode != "NONE":
+            if new_mode == self.mode:
+                self.mode_flicker_count += 1
+            else:
+                self.mode = new_mode
+                self.mode_flicker_count = 1
+                
+            # Stability check against flicker
+            if self.mode_flicker_count > 5:
+                self.stable_mode = self.mode
+
+    def update(self, index_pt, thumb_pt, cam_w, cam_h, fingers_up):
+        self.determine_mode(fingers_up)
+        
+        # 1. Map and Move (allowed in MOVE and DRAW modes)
+        if index_pt and self.stable_mode in ["MOVE", "DRAW"]:
+            target_x = np.interp(index_pt[0], [cam_w * 0.1, cam_w * 0.9], [0, self.screen_w])
+            target_y = np.interp(index_pt[1], [cam_h * 0.1, cam_h * 0.9], [0, self.screen_h])
+            
+            # Fix drawing release jitter
+            if self.movement_pause > 0:
+                self.movement_pause -= 1
+                target_x, target_y = self.prev_x, self.prev_y
+                
+            self.curr_x = self.prev_x + (target_x - self.prev_x) / self.smoothening
+            self.curr_y = self.prev_y + (target_y - self.prev_y) / self.smoothening
+            
+            pyautogui.moveTo(int(self.curr_x), int(self.curr_y))
+            self.prev_x, self.prev_y = self.curr_x, self.curr_y
+
+        # Basic distance eval
+        dist = 0
+        if index_pt and thumb_pt:
+            dist = math.hypot(thumb_pt[0] - index_pt[0], thumb_pt[1] - index_pt[1])
+            
+        if self.click_cooldown > 0:
+            self.click_cooldown -= 1
+            
+        # 2. Control Mode Routing
+        if self.stable_mode == "MOVE":
+            if self.is_drawing:
+                pyautogui.mouseUp()
+                self.is_drawing = False
+                
+            if index_pt and thumb_pt and self.click_cooldown == 0:
+                if dist < 40: 
+                    pyautogui.click()
+                    self.click_cooldown = 15
+                    
+        elif self.stable_mode == "DRAW":
+            if index_pt and thumb_pt:
+                if dist < 40:
+                    if not self.is_drawing:
+                        pyautogui.mouseDown()
+                        self.is_drawing = True
+                else:
+                    if self.is_drawing:
+                        pyautogui.mouseUp()
+                        self.is_drawing = False
+                        self.movement_pause = 10 # Delay before resume
+
+        elif self.stable_mode == "ERASE":
+            if self.click_cooldown == 0:
+                pyautogui.press('e')
+                self.click_cooldown = 40
+                
+        elif self.stable_mode == "CLEAR":
+            if self.click_cooldown == 0:
+                pyautogui.hotkey('ctrl', 'a')
+                pyautogui.press('delete')
+                self.click_cooldown = 60
 
 class HandTracker:
     def __init__(self, max_hands=1):
@@ -15,27 +117,48 @@ class HandTracker:
             min_tracking_confidence=0.7
         )
 
-    def get_index_fingertip(self, frame):
+    def get_hand_info(self, frame):
         # Convert BGR to RGB for MediaPipe
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.hands.process(rgb_frame)
         
         h, w, c = frame.shape
-        fingertip = None
+        fingertips = {}
+        fingers_up = [False, False, False, False]
         
         if results.multi_hand_landmarks:
             for hand_landmarks in results.multi_hand_landmarks:
-                # Landmark 8 is the tip of the index finger
-                lm = hand_landmarks.landmark[8]
-                fingertip = (int(lm.x * w), int(lm.y * h))
+                # Landmark IDs for all 5 fingertips
+                finger_ids = [4, 8, 12, 16, 20]
+                for fid in finger_ids:
+                    lm = hand_landmarks.landmark[fid]
+                    fingertips[fid] = (int(lm.x * w), int(lm.y * h))
+                
+                # Check up states: tip y < pip y
+                lmps = hand_landmarks.landmark
+                fingers_up[0] = lmps[8].y < lmps[6].y
+                fingers_up[1] = lmps[12].y < lmps[10].y
+                fingers_up[2] = lmps[16].y < lmps[14].y
+                fingers_up[3] = lmps[20].y < lmps[18].y
+
                 break # Ensure we only track one hand
                 
-        return fingertip
+        return fingertips, fingers_up
 
 class EffectsRenderer:
     def __init__(self):
-        # Trail configuration (limits particle count to 30)
-        self.trail_points = deque(maxlen=30) 
+        self.finger_ids = [4, 8, 12, 16, 20]
+        # Trail configuration (limits particle count) per finger
+        self.trail_points = {fid: deque(maxlen=20) for fid in self.finger_ids} 
+        
+        # Unique colors per finger (BGR format)
+        self.finger_colors = {
+            4: (0, 150, 255),    # Thumb: Orange
+            8: (255, 255, 0),    # Index: Cyan
+            12: (0, 255, 0),     # Middle: Green
+            16: (255, 0, 255),   # Ring: Magenta
+            20: (0, 0, 255)      # Pinky: Red
+        }
         
         # Standard time offset for continuous animation
         self.time_offset = 0.0
@@ -57,43 +180,49 @@ class EffectsRenderer:
             points.append((x, y, z))
         return points
 
-    def update(self, fingertip):
+    def update(self, fingertips):
         # Add a new point to the trail, deque automatically removes the oldest
-        if fingertip:
-            self.trail_points.appendleft(fingertip)
-        else:
-            # Gradually shrink trail if finger is not detected
-            if len(self.trail_points) > 0:
-                self.trail_points.pop() 
+        for fid in self.finger_ids:
+            pt = fingertips.get(fid)
+            if pt:
+                self.trail_points[fid].appendleft(pt)
+            else:
+                # Gradually shrink trail if finger is not detected
+                if len(self.trail_points[fid]) > 0:
+                    self.trail_points[fid].pop() 
                 
         self.time_offset += 0.1 # Advance time for animations
 
     def draw_trail(self, frame):
-        # Draw a fading particle trail
-        for i, pt in enumerate(self.trail_points):
-            # Calculate size based on age
-            age_factor = 1.0 - (i / len(self.trail_points))
-            radius = int(6 * age_factor)
-            
-            # Color variation: Green to Blue based on age
-            b = 255
-            g = int(255 * age_factor)
-            r = 0
-            
-            cv2.circle(frame, pt, radius, (b, g, r), -1)
+        # Draw fading particle trails for each finger
+        for fid, trail in self.trail_points.items():
+            base_color = self.finger_colors[fid]
+            for i, pt in enumerate(trail):
+                # Calculate size based on age
+                age_factor = 1.0 - (i / len(trail))
+                radius = int(6 * age_factor)
+                
+                # Fetch color fading for this specific finger
+                b = int(base_color[0] * age_factor)
+                g = int(base_color[1] * age_factor)
+                r = int(base_color[2] * age_factor)
+                
+                cv2.circle(frame, pt, radius, (b, g, r), -1)
 
-    def draw_spiral(self, frame, center):
+    def draw_spiral(self, frame, center, fid):
         # Draw a continuous smooth spiral line
         points = []
         num_turns = 3
-        max_radius = 80
-        segments = 60
+        max_radius = 50
+        segments = 40
+        
+        base_color = self.finger_colors[fid]
         
         # Generate spiral points
         for i in range(segments):
             t = i / segments # Normalized distance
             # Angle includes time_offset for rotation
-            angle = t * math.pi * 2 * num_turns + self.time_offset * 1.5
+            angle = t * math.pi * 2 * num_turns + self.time_offset * (1.5 if fid % 2 == 0 else -1.5)
             radius = t * max_radius
             
             x = int(center[0] + math.cos(angle) * radius)
@@ -103,8 +232,8 @@ class EffectsRenderer:
         # Connect points to make it continuous and smooth
         if len(points) > 1:
             for i in range(len(points) - 1):
-                # Color variation along the spiral path (Cyan to Magenta)
-                color = (255, int(255 * (1 - i/segments)), 255) 
+                fade = 1.0 - (i / segments)
+                color = (int(base_color[0]*fade), int(base_color[1]*fade), int(base_color[2]*fade))
                 cv2.line(frame, points[i], points[i+1], color, 2)
 
     def draw_sphere(self, frame, center):
@@ -149,6 +278,12 @@ def main():
     cap = cv2.VideoCapture(0)
     tracker = HandTracker()
     renderer = EffectsRenderer()
+    mouse_ctrl = MouseController()
+
+    window_name = "Hand Tracking Magic"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, 320, 240)
+    cv2.moveWindow(window_name, 10, 10)
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -157,23 +292,42 @@ def main():
             
         # Mirror image for intuitive interaction
         frame = cv2.flip(frame, 1) 
+        h, w, _ = frame.shape
         
-        # Extract finger tip and update rendering states
-        fingertip = tracker.get_index_fingertip(frame)
-        renderer.update(fingertip)
+        # Extract finger tips and get state array
+        fingertips, fingers_up = tracker.get_hand_info(frame)
+        renderer.update(fingertips)
         
-        if fingertip:
+        # Mouse Control layer
+        index_pt = fingertips.get(8)
+        thumb_pt = fingertips.get(4)
+        if index_pt:
+            mouse_ctrl.update(index_pt, thumb_pt, w, h, fingers_up)
+            
+            # Visual feedback for clicking (turns index finger green when pinched)
+            if thumb_pt and math.hypot(thumb_pt[0] - index_pt[0], thumb_pt[1] - index_pt[1]) < 40:
+                cv2.circle(frame, index_pt, 20, (0, 255, 0), cv2.FILLED)
+
+        if fingertips:
             # Render visual effects
             renderer.draw_trail(frame)
-            renderer.draw_spiral(frame, fingertip)
-            renderer.draw_sphere(frame, fingertip)
             
-            # Highlight the fingertip itself
-            cv2.circle(frame, fingertip, 6, (255, 255, 255), -1)
-            cv2.circle(frame, fingertip, 8, (0, 0, 0), 2)
+            for fid, pt in fingertips.items():
+                renderer.draw_spiral(frame, pt, fid)
+                
+                # Highlight the fingertip itself
+                cv2.circle(frame, pt, 6, (255, 255, 255), -1)
+                cv2.circle(frame, pt, 8, (0, 0, 0), 2)
+                
+            # Keep sphere just on index finger to avoid UI clutter
+            if 8 in fingertips:
+                renderer.draw_sphere(frame, fingertips[8])
+
+        # Draw Mode Text
+        cv2.putText(frame, f"Mode: {mouse_ctrl.stable_mode}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
         # Show final frame
-        cv2.imshow("Hand Tracking Magic", frame)
+        cv2.imshow(window_name, frame)
         
         # Break loop with 'ESC'
         if cv2.waitKey(1) & 0xFF == 27: 
