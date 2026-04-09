@@ -150,7 +150,7 @@ class MouseController:
                 pyautogui.press('delete')
 
 class HandTracker:
-    def __init__(self, max_hands=1):
+    def __init__(self, max_hands=2):
         # Initialize MediaPipe Hands
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
@@ -166,27 +166,37 @@ class HandTracker:
         results = self.hands.process(rgb_frame)
         
         h, w, c = frame.shape
-        fingertips = {}
-        fingers_up = [False, False, False, False]
+        primary_fingertips = {}
+        primary_fingers_up = [False, False, False, False]
+        all_hands = []
         
         if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
-                # Landmark IDs for all 5 fingertips
-                finger_ids = [4, 8, 12, 16, 20]
+            for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+                fingertips = {}
+                # Include wrist (0)
+                finger_ids = [0, 4, 8, 12, 16, 20]
                 for fid in finger_ids:
                     lm = hand_landmarks.landmark[fid]
                     fingertips[fid] = (int(lm.x * w), int(lm.y * h))
                 
                 # Check up states: tip y < pip y
                 lmps = hand_landmarks.landmark
+                fingers_up = [False, False, False, False]
                 fingers_up[0] = lmps[8].y < lmps[6].y
                 fingers_up[1] = lmps[12].y < lmps[10].y
                 fingers_up[2] = lmps[16].y < lmps[14].y
                 fingers_up[3] = lmps[20].y < lmps[18].y
 
-                break # Ensure we only track one hand
+                all_hands.append({"fingertips": fingertips, "fingers_up": fingers_up})
                 
-        return fingertips, fingers_up
+                # Assign Hand 1 exclusively to primary control
+                if idx == 0:
+                    primary_fingertips = fingertips.copy()
+                    if 0 in primary_fingertips:
+                        del primary_fingertips[0] # Hide wrist from legacy render logic
+                    primary_fingers_up = fingers_up
+                
+        return primary_fingertips, primary_fingers_up, all_hands
 
 class EffectsRenderer:
     def __init__(self):
@@ -317,11 +327,74 @@ class EffectsRenderer:
             
             cv2.circle(frame, (screen_x, screen_y), pt_radius, color, -1)
 
+class CloneEffect:
+    def __init__(self):
+        self.is_cloning = False
+        self.frame_buffer = deque(maxlen=15) 
+        self.flicker_count = 0
+        
+    def process(self, frame, all_hands):
+        self.frame_buffer.append(frame.copy())
+        
+        triggered = False
+        if len(all_hands) == 2:
+            h1 = all_hands[0]
+            h2 = all_hands[1]
+            
+            # Require Index + Middle up strictly on both hands (Peace sign)
+            peace = [True, True, False, False]
+            if h1["fingers_up"] == peace and h2["fingers_up"] == peace:
+                # Calculate alignment geometry: Wrist(0) to MiddleTip(12)
+                def get_angle(h_data):
+                    wrist = h_data["fingertips"][0]
+                    mid = h_data["fingertips"][12]
+                    return math.degrees(math.atan2(mid[1] - wrist[1], mid[0] - wrist[0]))
+
+                angle1 = get_angle(h1)
+                angle2 = get_angle(h2)
+                
+                # Are angles perpendicular (~90 degree offset for + shape)
+                angle_diff = abs(angle1 - angle2) % 360
+                
+                # Distance overlap checking between wrists
+                dist = math.hypot(h1["fingertips"][0][0] - h2["fingertips"][0][0],
+                                  h1["fingertips"][0][1] - h2["fingertips"][0][1])
+                                  
+                if (70 < angle_diff < 110) or (250 < angle_diff < 290) or dist < 120:
+                    triggered = True
+
+        # Edge state stability buffer
+        if triggered:
+            self.flicker_count += 1
+        else:
+            self.flicker_count = 0
+            self.is_cloning = False
+            
+        if self.flicker_count > 3:
+            self.is_cloning = True
+
+        # Render dynamically delayed clones
+        if self.is_cloning and len(self.frame_buffer) == 15:
+            past_img = self.frame_buffer[0]
+            h, w = frame.shape[:2]
+            
+            # Split off to sides heavily
+            M_right = np.float32([[1, 0, 160], [0, 1, 0]])
+            M_left = np.float32([[1, 0, -160], [0, 1, 0]])
+            
+            ghost1 = cv2.warpAffine(past_img, M_right, (w, h))
+            ghost2 = cv2.warpAffine(past_img, M_left, (w, h))
+            
+            # Blend compositionally exclusively over the camera frame array directly
+            cv2.addWeighted(frame, 1.0, ghost1, 0.5, 0, frame)
+            cv2.addWeighted(frame, 1.0, ghost2, 0.5, 0, frame)
+
 def main():
     cap = cv2.VideoCapture(0)
     tracker = HandTracker()
     renderer = EffectsRenderer()
     mouse_ctrl = MouseController()
+    clone_fx = CloneEffect()
 
     window_name = "Hand Tracking Magic"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -340,7 +413,7 @@ def main():
         h, w, _ = frame.shape
         
         # Extract finger tips and get state array
-        fingertips, fingers_up = tracker.get_hand_info(frame)
+        fingertips, fingers_up, all_hands = tracker.get_hand_info(frame)
         renderer.update(fingertips)
         
         # Mouse Control layer
@@ -367,6 +440,9 @@ def main():
             # Keep sphere just on index finger to avoid UI clutter
             if 8 in fingertips:
                 renderer.draw_sphere(frame, fingertips[8])
+                
+        # Draw Clone Overlay
+        clone_fx.process(frame, all_hands)
 
         # Draw Mode Text
         cv2.putText(frame, f"Mode: {mouse_ctrl.stable_mode}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
