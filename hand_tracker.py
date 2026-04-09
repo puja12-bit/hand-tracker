@@ -369,15 +369,16 @@ class CloneEffect:
                 if (70 < angle_diff < 110) or (250 < angle_diff < 290) or dist < 120:
                     triggered = True
 
-        # Edge state stability buffer
+        # Edge state stability buffer with bidirectional hysteresis
         if triggered:
-            self.flicker_count += 1
+            self.flicker_count = min(self.flicker_count + 1, 5)
         else:
-            self.flicker_count = 0
-            self.is_cloning = False
+            self.flicker_count = max(self.flicker_count - 1, 0)
             
-        if self.flicker_count > 3:
+        if self.flicker_count >= 3:
             self.is_cloning = True
+        elif self.flicker_count == 0:
+            self.is_cloning = False
 
         if self.clone_cooldown > 0:
             self.clone_cooldown -= 1
@@ -420,6 +421,19 @@ class CloneEffect:
         new_w, new_h = max(1, int(cw * 0.5)), max(1, int(ch * 0.5))
         crop_resized = cv2.resize(crop, (new_w, new_h))
         
+        # Apply a soft circular mask to eliminate square box edges
+        mask = np.zeros((new_h, new_w), dtype=np.float32)
+        center = (new_w // 2, new_h // 2)
+        radius = min(center[0], center[1]) - 10
+        cv2.circle(mask, center, max(1, radius), 1.0, -1)
+        mask = cv2.GaussianBlur(mask, (21, 21), 0)
+        
+        # Multiply RGB channels by mask
+        crop_float = crop_resized.astype(np.float32)
+        for c in range(3):
+            crop_float[:, :, c] *= mask
+        crop_masked = crop_float.astype(np.uint8)
+        
         idx = len(self.clones)
         # Place them along the left/right edges iteratively
         if idx % 2 == 0:
@@ -429,8 +443,9 @@ class CloneEffect:
             px = w - new_w - 20
             py = max(20, min(h - new_h - 20, (idx // 2) * int(h / 3.5) + 20))
             
-        # Draw onto canvas strictly
-        self.clone_canvas[py:py+new_h, px:px+new_w] = crop_resized
+        # Draw onto canvas additively to naturally merge soft edges
+        roi = self.clone_canvas[py:py+new_h, px:px+new_w]
+        self.clone_canvas[py:py+new_h, px:px+new_w] = cv2.add(roi, crop_masked)
         self.clones.append((px, py))
 
 def main():
