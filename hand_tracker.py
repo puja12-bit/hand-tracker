@@ -361,29 +361,33 @@ class CloneEffect:
             h1 = all_hands[0]
             h2 = all_hands[1]
             
-            # Requirement: Index and Middle fingers MUST be up (lenient)
+            # Requirement: Index and Middle fingers MUST be up
             peace = [True, True]
             if h1["fingers_up"][:2] == peace and h2["fingers_up"][:2] == peace:
-                # Calculate Bounding Boxes for both hands
-                def get_bbox(fingertips):
-                    pts = np.array(list(fingertips.values()))
-                    return np.min(pts, axis=0), np.max(pts, axis=0)
+                # Orientation vectors (Wrist(0) -> Middle Tip(12))
+                def get_vector(h_data):
+                    wrist = h_data["fingertips"][0]
+                    mid = h_data["fingertips"][12]
+                    return (mid[0] - wrist[0], mid[1] - wrist[1])
+
+                v1 = get_vector(h1)
+                v2 = get_vector(h2)
                 
-                min1, max1 = get_bbox(h1["fingertips"])
-                min2, max2 = get_bbox(h2["fingertips"])
-                
-                # Check for Bounding Box overlap (magnetic +/- sign)
-                # Overlap on X and Y means the hands are crossed or very close
-                overlap_x = not (max1[0] < min2[0] or max2[0] < min1[0])
-                overlap_y = not (max1[1] < min2[1] or max2[1] < min1[1])
-                
-                # Distance between wrists for fallback
-                dist = math.hypot(h1["fingertips"][0][0] - h2["fingertips"][0][0],
-                                  h1["fingertips"][0][1] - h2["fingertips"][0][1])
-                                  
-                # Trigger if hands are overlapping OR extremely close
-                if (overlap_x and overlap_y) or dist < 160:
-                    triggered = True
+                # Check for crossing (one vertical, one horizontal as in the referene image)
+                # Vertical: |y| > |x| * 1.5, Horizontal: |x| > |y| * 1.5
+                h1_vert = abs(v1[1]) > abs(v1[0]) * 1.5
+                h1_horz = abs(v1[0]) > abs(v1[1]) * 1.5
+                h2_vert = abs(v2[1]) > abs(v2[0]) * 1.5
+                h2_horz = abs(v2[0]) > abs(v2[1]) * 1.5
+
+                # Cross shape check: (H1 Vertical + H2 Horizontal) OR (H1 Horizontal + H2 Vertical)
+                if (h1_vert and h2_horz) or (h1_horz and h2_vert):
+                    # Fingertip proximity: index/middle fingers should be close
+                    # MediaPipe ID 8 is Index Tip, 12 is Middle Tip
+                    c1 = h1["fingertips"][12]
+                    c2 = h2["fingertips"][12]
+                    if math.hypot(c1[0] - c2[0], c1[1] - c2[1]) < 90:
+                        triggered = True
 
         # Robust Hysteresis Buffer: Increase 'memory' to 20 frames (~1.5s delay on clear)
         if triggered:
