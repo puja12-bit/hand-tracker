@@ -361,9 +361,9 @@ class CloneEffect:
             h1 = all_hands[0]
             h2 = all_hands[1]
             
-            # Require Index + Middle up strictly on both hands (Peace sign)
-            peace = [True, True, False, False]
-            if h1["fingers_up"] == peace and h2["fingers_up"] == peace:
+            # Requirement: Index and Middle fingers MUST be up (ignoring Ring/Pinky for stability)
+            peace = [True, True]
+            if h1["fingers_up"][:2] == peace and h2["fingers_up"][:2] == peace:
                 # Calculate alignment geometry: Wrist(0) to MiddleTip(12)
                 def get_angle(h_data):
                     wrist = h_data["fingertips"][0]
@@ -383,14 +383,14 @@ class CloneEffect:
                 if (70 < angle_diff < 110) or (250 < angle_diff < 290) or dist < 120:
                     triggered = True
 
-        # Edge state stability buffer with bidirectional hysteresis
+        # Robust Hysteresis Buffer: Increase 'memory' to 20 frames (~1.5s delay on clear)
         if triggered:
-            self.flicker_count = min(self.flicker_count + 1, 5)
+            self.flicker_count = min(self.flicker_count + 1, 20)
         else:
             self.flicker_count = max(self.flicker_count - 1, 0)
             
         was_cloning = self.is_cloning
-        if self.flicker_count >= 3:
+        if self.flicker_count >= 5: # Require 5 stable frames to start
             self.is_cloning = True
         elif self.flicker_count == 0:
             self.is_cloning = False
