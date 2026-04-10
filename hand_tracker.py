@@ -401,11 +401,17 @@ class CloneEffect:
             if not was_cloning:
                 self._spawn_multi_clones(frame)
             
-            # Direct blend using mask_canvas for 'full colour' doppelganger look
-            # This replaces frame pixels with clone pixels 100% where masked
-            # frame = frame * (1 - mask) + clones * mask
-            frame[:] = (frame.astype(np.float32) * (1.0 - self.mask_canvas) + 
-                       self.clone_canvas.astype(np.float32) * self.mask_canvas).astype(np.uint8)
+            # Layering: ensure the actual person is IN FRONT of the clones
+            # We get the mask of the person in the current live frame
+            current_mask = self.segmenter.get_mask(frame)
+            current_mask_3ch = np.stack((current_mask,) * 3, axis=-1)
+            
+            # We only show clones where the actual person is NOT (current_mask < 0.1)
+            # This effectively puts the 'Doppelgangers' behind you
+            clone_visibility_mask = self.mask_canvas * (1.0 - current_mask_3ch)
+            
+            frame[:] = (frame.astype(np.float32) * (1.0 - clone_visibility_mask) + 
+                       self.clone_canvas.astype(np.float32) * clone_visibility_mask).astype(np.uint8)
         else:
             # Reset clones when gesture is removed
             self.clones.clear()
