@@ -387,65 +387,53 @@ class CloneEffect:
         else:
             self.flicker_count = max(self.flicker_count - 1, 0)
             
+        was_cloning = self.is_cloning
         if self.flicker_count >= 3:
             self.is_cloning = True
         elif self.flicker_count == 0:
             self.is_cloning = False
 
-        if self.clone_cooldown > 0:
-            self.clone_cooldown -= 1
-
         # Render logically and persistently
         if self.is_cloning:
-            if self.clone_cooldown == 0 and len(self.clones) < 8: # Limit number of clones
-                self._capture_clone(frame, all_hands)
-                self.clone_cooldown = 15 # Delay between drops
+            # First frame of cloning: spawn all clones at once
+            if not was_cloning:
+                self._spawn_multi_clones(frame)
             
             # Blend canvas with main frame to avoid flickering natively
-            cv2.addWeighted(frame, 1.0, self.clone_canvas, 0.7, 0, frame)
+            # Increased alpha to 0.85 for high visibility 'as is'
+            cv2.addWeighted(frame, 1.0, self.clone_canvas, 0.85, 0, frame)
         else:
             # Reset clones when gesture is removed
             self.clones.clear()
             self.clone_canvas.fill(0)
             
-    def _capture_clone(self, frame, all_hands):
+    def _spawn_multi_clones(self, frame):
         h, w = frame.shape[:2]
         
-        # Get character mask using Selfie Segmentation for natural edges
+        # Get character mask/cutout once
         mask = self.segmenter.get_mask(frame)
-        
-        # Refine mask: threshold and blur for soft edges
         condition = np.stack((mask,) * 3, axis=-1) > 0.1
-        
-        # Get a clean cutout of the person
         person_cutout = np.where(condition, frame, 0).astype(np.uint8)
         
-        # Optimization: We only want to paste the person, not the whole frame again
-        # But for simpler logic, we'll shift the whole cutout
+        # Wide offsets for multiple clones
+        offsets = [-w//3.5, w//3.5, -w//1.8, w//1.8]
         
-        idx = len(self.clones)
-        
-        # Define offsets like Naruto shadow clones (alternating sides)
-        offsets = [-w//3, w//3, -w//1.8, w//1.8, -w//1.2, w//1.2, 0] # Example offsets
-        offset_x = int(offsets[idx % len(offsets)])
-        
-        # Create a translation matrix for the shadow clone
-        M = np.float32([[1, 0, offset_x], [0, 1, 0]])
-        shifted_clone = cv2.warpAffine(person_cutout, M, (w, h))
-        
-        # Combine with soft additive blending on the persistent canvas
-        # This avoids the square boxes because person_cutout only contains the silhouette
-        mask_shifted = cv2.warpAffine(mask, M, (w, h))
-        mask_shifted_3ch = np.stack((mask_shifted,) * 3, axis=-1)
-        
-        # Smooth the shifted mask edges
-        mask_shifted_3ch = cv2.GaussianBlur(mask_shifted_3ch, (11, 11), 0)
-        
-        # Only update the canvas where the person is
-        # We blend the shifted_clone into the existing clone_canvas
-        self.clone_canvas = cv2.addWeighted(self.clone_canvas, 1.0, shifted_clone, 0.8, 0)
-        
-        self.clones.append(offset_x)
+        for offset_x in offsets:
+            M = np.float32([[1, 0, int(offset_x)], [0, 1, 0]])
+            shifted_person = cv2.warpAffine(person_cutout, M, (w, h))
+            shifted_mask = cv2.warpAffine(mask, M, (w, h))
+            
+            # Use the mask to smoothly add the person to the canvas
+            # We use Gaussian blur on the mask for natural soft edges
+            soft_mask = cv2.GaussianBlur(shifted_mask, (15, 15), 0)
+            soft_mask_3ch = np.stack((soft_mask,) * 3, axis=-1)
+            
+            # Blend natural person into the canvas
+            # canvas = canvas * (1 - mask) + person * mask
+            inv_mask = 1.0 - soft_mask_3ch
+            self.clone_canvas = (self.clone_canvas * inv_mask + shifted_person * soft_mask_3ch).astype(np.uint8)
+            
+            self.clones.append(offset_x)
 
 def main():
     cap = cv2.VideoCapture(0)
