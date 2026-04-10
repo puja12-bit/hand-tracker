@@ -343,6 +343,7 @@ class CloneEffect:
         self.is_cloning = False
         self.flicker_count = 0
         self.clone_canvas = None
+        self.mask_canvas = None
         self.clones = []
         self.clone_cooldown = 0
         self.segmenter = SelfieSegmenter()
@@ -353,6 +354,7 @@ class CloneEffect:
         # Initialize canvas if needed
         if self.clone_canvas is None or self.clone_canvas.shape != frame.shape:
             self.clone_canvas = np.zeros_like(frame)
+            self.mask_canvas = np.zeros((h, w, 3), dtype=np.float32)
             
         triggered = False
         if len(all_hands) == 2:
@@ -395,17 +397,20 @@ class CloneEffect:
 
         # Render logically and persistently
         if self.is_cloning:
-            # First frame of cloning: spawn all clones at once
+            # First frame of cloning: spawn all 12 clones at once
             if not was_cloning:
                 self._spawn_multi_clones(frame)
             
-            # Blend canvas with main frame to avoid flickering natively
-            # Increased alpha to 0.85 for high visibility 'as is'
-            cv2.addWeighted(frame, 1.0, self.clone_canvas, 0.85, 0, frame)
+            # Direct blend using mask_canvas for 'full colour' doppelganger look
+            # This replaces frame pixels with clone pixels 100% where masked
+            # frame = frame * (1 - mask) + clones * mask
+            frame[:] = (frame.astype(np.float32) * (1.0 - self.mask_canvas) + 
+                       self.clone_canvas.astype(np.float32) * self.mask_canvas).astype(np.uint8)
         else:
             # Reset clones when gesture is removed
             self.clones.clear()
             self.clone_canvas.fill(0)
+            self.mask_canvas.fill(0)
             
     def _spawn_multi_clones(self, frame):
         h, w = frame.shape[:2]
@@ -415,23 +420,33 @@ class CloneEffect:
         condition = np.stack((mask,) * 3, axis=-1) > 0.1
         person_cutout = np.where(condition, frame, 0).astype(np.uint8)
         
-        # Wide offsets for multiple clones
-        offsets = [-w//3.5, w//3.5, -w//1.8, w//1.8]
+        # 12 offsets for 'Double of 6' clones
+        offsets = [
+            -w//5, w//5, -w//3, w//3, 
+            -w//2.2, w//2.2, -w//1.8, w//1.8,
+            -w//1.5, w//1.5, -w//8, w//8
+        ]
+        
+        # Sort offsets so we paint them from edges to center (layering)
+        offsets.sort(key=abs, reverse=True)
         
         for offset_x in offsets:
             M = np.float32([[1, 0, int(offset_x)], [0, 1, 0]])
             shifted_person = cv2.warpAffine(person_cutout, M, (w, h))
             shifted_mask = cv2.warpAffine(mask, M, (w, h))
             
-            # Use the mask to smoothly add the person to the canvas
-            # We use Gaussian blur on the mask for natural soft edges
-            soft_mask = cv2.GaussianBlur(shifted_mask, (15, 15), 0)
+            # Create a 3-channel soft mask for this clone
+            soft_mask = cv2.GaussianBlur(shifted_mask, (11, 11), 0)
             soft_mask_3ch = np.stack((soft_mask,) * 3, axis=-1)
             
-            # Blend natural person into the canvas
-            # canvas = canvas * (1 - mask) + person * mask
-            inv_mask = 1.0 - soft_mask_3ch
-            self.clone_canvas = (self.clone_canvas * inv_mask + shifted_person * soft_mask_3ch).astype(np.uint8)
+            # Combine into the persistent canvas and overall mask
+            # We use alpha-compositing locally to stack clones properly
+            mask_layer = soft_mask_3ch
+            self.clone_canvas = (self.clone_canvas.astype(np.float32) * (1.0 - mask_layer) + 
+                                shifted_person.astype(np.float32) * mask_layer).astype(np.uint8)
+            
+            # Update the global mask canvas (used for the final frame replacement)
+            self.mask_canvas = np.maximum(self.mask_canvas, soft_mask_3ch)
             
             self.clones.append(offset_x)
 
