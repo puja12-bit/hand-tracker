@@ -198,6 +198,17 @@ class HandTracker:
                 
         return primary_fingertips, primary_fingers_up, all_hands
 
+class SelfieSegmenter:
+    def __init__(self):
+        self.mp_selfie = mp.solutions.selfie_segmentation
+        self.selfie = self.mp_selfie.SelfieSegmentation(model_selection=1) # 1 for general model
+
+    def get_mask(self, frame):
+        # Convert BGR to RGB for MediaPipe
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.selfie.process(rgb_frame)
+        return results.segmentation_mask
+
 class EffectsRenderer:
     def __init__(self):
         self.finger_ids = [4, 8, 12, 16, 20]
@@ -334,6 +345,7 @@ class CloneEffect:
         self.clone_canvas = None
         self.clones = []
         self.clone_cooldown = 0
+        self.segmenter = SelfieSegmenter()
         
     def process(self, frame, all_hands):
         h, w = frame.shape[:2]
@@ -390,7 +402,7 @@ class CloneEffect:
                 self.clone_cooldown = 15 # Delay between drops
             
             # Blend canvas with main frame to avoid flickering natively
-            cv2.addWeighted(frame, 1.0, self.clone_canvas, 0.6, 0, frame)
+            cv2.addWeighted(frame, 1.0, self.clone_canvas, 0.7, 0, frame)
         else:
             # Reset clones when gesture is removed
             self.clones.clear()
@@ -399,54 +411,41 @@ class CloneEffect:
     def _capture_clone(self, frame, all_hands):
         h, w = frame.shape[:2]
         
-        # Bounding box around hands strictly
-        min_x, min_y, max_x, max_y = w, h, 0, 0
-        for hand in all_hands:
-            for pt in hand["fingertips"].values():
-                min_x = min(min_x, pt[0])
-                max_x = max(max_x, pt[0])
-                min_y = min(min_y, pt[1])
-                max_y = max(max_y, pt[1])
-                
-        pad = 80
-        min_x, min_y = max(0, min_x - pad), max(0, min_y - pad)
-        max_x, max_y = min(w, max_x + pad), min(h, max_y + pad)
+        # Get character mask using Selfie Segmentation for natural edges
+        mask = self.segmenter.get_mask(frame)
         
-        if max_x - min_x < 20 or max_y - min_y < 20: return
+        # Refine mask: threshold and blur for soft edges
+        condition = np.stack((mask,) * 3, axis=-1) > 0.1
         
-        crop = frame[min_y:max_y, min_x:max_x].copy()
-        cw, ch = crop.shape[1], crop.shape[0]
+        # Get a clean cutout of the person
+        person_cutout = np.where(condition, frame, 0).astype(np.uint8)
         
-        # Resize properly while preserving aspect ratio
-        new_w, new_h = max(1, int(cw * 0.5)), max(1, int(ch * 0.5))
-        crop_resized = cv2.resize(crop, (new_w, new_h))
-        
-        # Apply a soft circular mask to eliminate square box edges
-        mask = np.zeros((new_h, new_w), dtype=np.float32)
-        center = (new_w // 2, new_h // 2)
-        radius = min(center[0], center[1]) - 10
-        cv2.circle(mask, center, max(1, radius), 1.0, -1)
-        mask = cv2.GaussianBlur(mask, (21, 21), 0)
-        
-        # Multiply RGB channels by mask
-        crop_float = crop_resized.astype(np.float32)
-        for c in range(3):
-            crop_float[:, :, c] *= mask
-        crop_masked = crop_float.astype(np.uint8)
+        # Optimization: We only want to paste the person, not the whole frame again
+        # But for simpler logic, we'll shift the whole cutout
         
         idx = len(self.clones)
-        # Place them along the left/right edges iteratively
-        if idx % 2 == 0:
-            px = 20
-            py = max(20, min(h - new_h - 20, (idx // 2) * int(h / 3.5) + 20))
-        else:
-            px = w - new_w - 20
-            py = max(20, min(h - new_h - 20, (idx // 2) * int(h / 3.5) + 20))
-            
-        # Draw onto canvas additively to naturally merge soft edges
-        roi = self.clone_canvas[py:py+new_h, px:px+new_w]
-        self.clone_canvas[py:py+new_h, px:px+new_w] = cv2.add(roi, crop_masked)
-        self.clones.append((px, py))
+        
+        # Define offsets like Naruto shadow clones (alternating sides)
+        offsets = [-w//3, w//3, -w//1.8, w//1.8, -w//1.2, w//1.2, 0] # Example offsets
+        offset_x = int(offsets[idx % len(offsets)])
+        
+        # Create a translation matrix for the shadow clone
+        M = np.float32([[1, 0, offset_x], [0, 1, 0]])
+        shifted_clone = cv2.warpAffine(person_cutout, M, (w, h))
+        
+        # Combine with soft additive blending on the persistent canvas
+        # This avoids the square boxes because person_cutout only contains the silhouette
+        mask_shifted = cv2.warpAffine(mask, M, (w, h))
+        mask_shifted_3ch = np.stack((mask_shifted,) * 3, axis=-1)
+        
+        # Smooth the shifted mask edges
+        mask_shifted_3ch = cv2.GaussianBlur(mask_shifted_3ch, (11, 11), 0)
+        
+        # Only update the canvas where the person is
+        # We blend the shifted_clone into the existing clone_canvas
+        self.clone_canvas = cv2.addWeighted(self.clone_canvas, 1.0, shifted_clone, 0.8, 0)
+        
+        self.clones.append(offset_x)
 
 def main():
     cap = cv2.VideoCapture(0)
