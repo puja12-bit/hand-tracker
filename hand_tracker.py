@@ -361,26 +361,28 @@ class CloneEffect:
             h1 = all_hands[0]
             h2 = all_hands[1]
             
-            # Requirement: Index and Middle fingers MUST be up (ignoring Ring/Pinky for stability)
+            # Requirement: Index and Middle fingers MUST be up (lenient)
             peace = [True, True]
             if h1["fingers_up"][:2] == peace and h2["fingers_up"][:2] == peace:
-                # Calculate alignment geometry: Wrist(0) to MiddleTip(12)
-                def get_angle(h_data):
-                    wrist = h_data["fingertips"][0]
-                    mid = h_data["fingertips"][12]
-                    return math.degrees(math.atan2(mid[1] - wrist[1], mid[0] - wrist[0]))
-
-                angle1 = get_angle(h1)
-                angle2 = get_angle(h2)
+                # Calculate Bounding Boxes for both hands
+                def get_bbox(fingertips):
+                    pts = np.array(list(fingertips.values()))
+                    return np.min(pts, axis=0), np.max(pts, axis=0)
                 
-                # Are angles perpendicular (~90 degree offset for + shape)
-                angle_diff = abs(angle1 - angle2) % 360
+                min1, max1 = get_bbox(h1["fingertips"])
+                min2, max2 = get_bbox(h2["fingertips"])
                 
-                # Distance overlap checking between wrists
+                # Check for Bounding Box overlap (magnetic +/- sign)
+                # Overlap on X and Y means the hands are crossed or very close
+                overlap_x = not (max1[0] < min2[0] or max2[0] < min1[0])
+                overlap_y = not (max1[1] < min2[1] or max2[1] < min1[1])
+                
+                # Distance between wrists for fallback
                 dist = math.hypot(h1["fingertips"][0][0] - h2["fingertips"][0][0],
                                   h1["fingertips"][0][1] - h2["fingertips"][0][1])
                                   
-                if (70 < angle_diff < 110) or (250 < angle_diff < 290) or dist < 120:
+                # Trigger if hands are overlapping OR extremely close
+                if (overlap_x and overlap_y) or dist < 160:
                     triggered = True
 
         # Robust Hysteresis Buffer: Increase 'memory' to 20 frames (~1.5s delay on clear)
